@@ -1,36 +1,30 @@
 local component = require("component")
 local event = require("event")
 
-local lowerReactorTemperature = 1156000000
-local upperReactorTemperature = 4430000000
-
-local lowerReactorAddress = "ae2938f7-9f56-4b42-8730-9f96ec361e0f"
-local upperReactorAddress = "b52aef7d-7339-465c-b986-43d5299d101f"
-local batteryMeterAddress = "254e4379-f940-4d25-aecc-6103bb6d75ab"
-local gridMetterAddress = "62931ca1-755a-4413-8ed8-da763abc7b35"
-
-local lowerReactor = component.proxy(lowerReactorAddress)
-local upperReactor = component.proxy(upperReactorAddress)
-local batteryMeter = component.proxy(batteryMeterAddress)
-local gridMetter = component.proxy(gridMetterAddress)
+local metter = component.energy_meter
 local powerStatus = true
-local lowerReactorActive = false
-local upperReactorActive = false
+local reactorStatus = {}
 
-function onUnknownReactor()
-    print("========== ERROR UNKNOWN REACTOR FOUND ========== ")
-    local reactors = {}
-    for address, reactor in component.list("nc_fusion_reactor") do
-        reactor.deactivate()
+local optTemp = {}
+optTemp["hydrogenhydrogen"] = 4430000000
+optTemp["hydrogendeuterium"] = 1245000000
+optTemp["hydrogenhelium3"] = 3339000000
+
+function optimalTemperature(reactor)
+    local first = reactor.getFirstFusionFuel()
+    local second = reactor.getSecondFusionFuel()
+
+    if optTemp[first..second] then
+        return optTemp[first..second]
     end
-    os.exit()
+
+    return 0
 end
 
 function onPowerFault()
     if powerStatus then
         print("========== ERROR POWER FAULT DETECTED ========== ")
-        gridMetter.setTransferRateLimit(0)
-        batteryMeter.setTransferRateLimit(-1)
+        metter.setTransferRateLimit(0)
         powerStatus = false
     end
 end
@@ -38,8 +32,7 @@ end
 function onPowerResume()
     if not powerStatus then
         print("========== POWER RESUMED ========== ")
-        gridMetter.setTransferRateLimit(-1)
-        batteryMeter.setTransferRateLimit(0)
+        metter.setTransferRateLimit(-1)
         powerStatus = true
     end
 end
@@ -49,71 +42,75 @@ function onError()
 end
 
 function checkReactors()
-    local reactors = {}
-    for address, reactor in component.list("nc_fusion_reactor") do
-        if not address == lowerReactor and not address == upperReactor then
-            onUnknownReactor()
+    for address, _ in component.list("nc_fusion_reactor") do
+        local reactor = component.proxy(address)
+
+        if reactor.getTemperature() < optimalTemperature(reactor) then
+            reactor.activate()
+            if not reactorStatus[address] or reactorStatus[address] == nil then
+                local first = reactor.getFirstFusionFuel()
+                local second = reactor.getSecondFusionFuel()
+                print("UP - "..first.." | "..second.." - "..address)
+            end
+            reactorStatus[address] = true
+        else
+            reactor.deactivate()
+            if reactorStatus[address]  or reactorStatus[address] == nil then
+                local first = reactor.getFirstFusionFuel()
+                local second = reactor.getSecondFusionFuel()
+                print("DOWN - "..first.." | "..second.." - "..address)
+            end
+            reactorStatus[address] = false
         end
-    end
-
-    if upperReactor.getTemperature() >= upperReactorTemperature and upperReactorActive then
-        upperReactor.deactivate()
-        upperReactorActive = false
-        print("UPPER DOWN")
-    elseif not upperReactorActive then
-        upperReactor.activate()
-        upperReactorActive = true
-        print("UPPER UP")
-    end
-
-    if lowerReactor.getTemperature() >= lowerReactorTemperature and lowerReactorActive then
-        lowerReactor.deactivate()
-        lowerReactorActive = false
-        print("LOWER DOWN")
-    elseif not lowerReactorActive then
-        lowerReactor.activate()
-        lowerReactorActive = true
-        print("LOWER UP")
     end
 end
 
 function checkPower()
-    local lowerReactorPower = lowerReactor.getEnergyStored() / lowerReactor.getMaxEnergyStored()
-    local upperReactorPower = upperReactor.getEnergyStored() / upperReactor.getMaxEnergyStored()
+    local allAbove = true
 
-    if lowerReactorPower < 0.5 or upperReactorPower < 0.5 then
-        onPowerFault()
-    elseif lowerReactorPower > 0.95 and upperReactorPower > 0.95 then
+    for address, _ in component.list("nc_fusion_reactor") do
+        local reactor = component.proxy(address)
+        local ratio = reactor.getEnergyStored() / reactor.getMaxEnergyStored()
+
+        if ratio < 0.5 then
+            onPowerFault()
+            return
+        end
+
+        if ratio < 0.9 then
+            allAbove = false
+        end
+    end
+    
+    if allAbove then
         onPowerResume()
     end
 end
 
 function run()
-    if not pcall(checkPower) then
+    fine, error = pcall(checkPower)
+    if not fine then
+        print(error)
         onPowerFault()
     end
 
-    if not pcall(checkReactors) then
+    fine, error = pcall(checkReactors)
+    if not fine then
+        print(error)
         onError()
     end
 end
 
 --SET INITIAL VALUES
-lowerReactor.deactivate()
-upperReactor.deactivate()
-lowerReactorActive = false
-upperReactorActive = false
-gridMetter.setTransferRateLimit(-1)
-batteryMeter.setTransferRateLimit(0)
+metter.setTransferRateLimit(-1)
 powerStatus = false
 
 repeat
-    if not pcall(run) then
+    fine, error = pcall(checkReactors)
+    if not fine then
+        print(error)
         onError()
     end
 until event.pull(0.1) == "interrupted"
 
-gridMetter.setTransferRateLimit(0)
-batteryMeter.setTransferRateLimit(-1)
-lowerReactor.deactivate()
-upperReactor.deactivate()
+metter.setTransferRateLimit(0)
